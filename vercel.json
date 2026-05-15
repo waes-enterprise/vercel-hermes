@@ -1,9 +1,5 @@
 {
-  "version": 2,
-  "builds": [
-    { "src": "api/discord.js", "use": "@vercel/node" }
-  ],
-  "routes": [
-    { "src": "/api/discord", "dest": "/api/discord" }
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/" }
   ]
 }
