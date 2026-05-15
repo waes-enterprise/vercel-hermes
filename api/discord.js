@@ -10,14 +10,8 @@ const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const PUBLIC_KEY = process.env.DISCORD_PUBLIC_KEY;
 const DEFAULT_MODEL = process.env.AI_MODEL || 'anthropic/claude-haiku-4';
-const ALLOWED_USERS = process.env.DISCORD_ALLOWED_USERS
-  ? process.env.DISCORD_ALLOWED_USERS.split(',').map(id => id.trim())
-  : [];
 
-const SYSTEM_PROMPT = `You are Hermes, a helpful AI assistant built by WAES Enterprise. You help with coding, research, writing, analysis, math, and general questions. Be clear, helpful, and concise.`;
-
-const memory = new Map();
-const MAX_MSGS = 12;
+const SYSTEM_PROMPT = `You are Hermes, a helpful AI assistant built by WAES Enterprise. Be clear, helpful, and concise.`;
 
 function getRawBody(req) {
   return new Promise((resolve, reject) => {
@@ -28,21 +22,8 @@ function getRawBody(req) {
   });
 }
 
-function getMemory(key) {
-  if (!memory.has(key)) memory.set(key, [{ role: 'system', content: SYSTEM_PROMPT }]);
-  return memory.get(key);
-}
-
-function trimMemory(arr) {
-  if (arr.length <= MAX_MSGS + 1) return arr;
-  return [arr[0], ...arr.slice(-MAX_MSGS)];
-}
-
 module.exports = async (req, res) => {
-  if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).send('Method Not Allowed');
-
-  let logId = Math.random().toString(36).slice(2, 8);
 
   try {
     const rawBody = await getRawBody(req);
@@ -50,120 +31,79 @@ module.exports = async (req, res) => {
     const timestamp = req.headers['x-signature-timestamp'];
 
     if (!signature || !timestamp || !verifyKey(rawBody, signature, timestamp, PUBLIC_KEY)) {
-      return res.status(401).send('Invalid signature');
+      return res.status(401).send('Bad sig');
     }
 
-    const interaction = JSON.parse(rawBody);
-    const cmd = interaction.data?.name || 'N/A';
+    const body = JSON.parse(rawBody);
 
-    // PING
-    if (interaction.type === 1) {
-      return res.status(200).json({ type: 1 });
-    }
+    if (body.type === 1) return res.status(200).json({ type: 1 });
 
-    // SLASH COMMAND
-    if (interaction.type === 2) {
-      const userId = interaction.member?.user?.id || interaction.user?.id;
-      const channelId = interaction.channel_id;
-      const memKey = `${userId}_${channelId}`;
+    if (body.type === 2) {
+      const cmd = body.data.name;
+      const opts = body.data.options || [];
+      const val = opts[0]?.value || '';
 
-      if (ALLOWED_USERS.length > 0 && !ALLOWED_USERS.includes(userId)) {
-        return res.status(200).json({ type: 4, data: { content: 'Not authorized.', flags: 64 } });
-      }
+      console.log(`CMD: ${cmd} | OPTS: ${JSON.stringify(opts)}`);
 
-      const opts = interaction.data.options || [];
-      const opt = (name) => opts.find(o => o.name === name)?.value || '';
-
-      // ========== /ask ==========
+      // /ask — DIAGNOSTIC MODE: hardcoded response first
       if (cmd === 'ask') {
-        const userMsg = opt('message');
-
-        if (!userMsg) {
-          return res.status(200).json({ type: 4, data: { content: 'Usage: `/ask <your message>`' } });
-        }
+        console.log(`ASK RECEIVED: "${val}"`);
 
         if (!OPENROUTER_API_KEY) {
-          return res.status(200).json({ type: 4, data: { content: 'Error: API key not configured.' } });
+          return res.json({ type: 4, data: { content: 'No API key set on Vercel.' } });
         }
 
+        // Try AI call with a short timeout
         try {
-          const hist = getMemory(memKey);
-          hist.push({ role: 'user', content: userMsg });
-
+          console.log('Calling AI...');
           const aiResp = await fetch(OPENROUTER_URL, {
             method: 'POST',
             headers: {
               'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
               'Content-Type': 'application/json',
               'HTTP-Referer': 'https://waes-enterprise.vercel.app',
-              'X-Title': 'Hermes Discord Bot',
+              'X-Title': 'Hermes',
             },
             body: JSON.stringify({
               model: DEFAULT_MODEL,
-              messages: trimMemory(hist),
-              max_tokens: 1024,
+              messages: [
+                { role: 'system', content: SYSTEM_PROMPT },
+                { role: 'user', content: val },
+              ],
+              max_tokens: 200,
               temperature: 0.7,
             }),
           });
 
+          console.log(`AI status: ${aiResp.status}`);
+
           if (!aiResp.ok) {
-            const errText = await aiResp.text();
-            return res.status(200).json({ type: 4, data: { content: `AI error ${aiResp.status}: ${errText.slice(0, 200)}` } });
+            const err = await aiResp.text();
+            console.log(`AI error: ${err}`);
+            return res.json({ type: 4, data: { content: `AI error ${aiResp.status}` } });
           }
 
           const aiData = await aiResp.json();
-          const reply = aiData.choices?.[0]?.message?.content || 'No response.';
+          const reply = aiData.choices?.[0]?.message?.content || 'Empty reply';
+          console.log(`AI reply: ${reply.slice(0, 100)}`);
 
-          hist.push({ role: 'assistant', content: reply });
-          memory.set(memKey, trimMemory(hist));
-
-          return res.status(200).json({ type: 4, data: { content: reply } });
+          return res.json({ type: 4, data: { content: reply } });
         } catch (err) {
-          return res.status(200).json({ type: 4, data: { content: `Error: ${err.message}` } });
+          console.log(`ASK FAILED: ${err.message}`);
+          return res.json({ type: 4, data: { content: `Failed: ${err.message}` } });
         }
       }
 
-      // ========== /ping ==========
-      if (cmd === 'ping') {
-        return res.status(200).json({
-          type: 4,
-          data: {
-            content: `Pong! Bot is live. Model: \`${DEFAULT_MODEL}\`. API key: ${OPENROUTER_API_KEY ? 'OK' : 'MISSING'}. ID: ${logId}`,
-          },
-        });
-      }
-
-      // ========== Simple commands ==========
-      if (cmd === 'new') {
-        memory.delete(memKey);
-        return res.status(200).json({ type: 4, data: { content: 'Conversation cleared!' } });
-      }
-
-      if (cmd === 'model') {
-        return res.status(200).json({ type: 4, data: { content: `Model: \`${DEFAULT_MODEL}\`` } });
-      }
-
       if (cmd === 'help') {
-        return res.status(200).json({
-          type: 4,
-          data: {
-            content: `**Commands:**\n- \`/ask <msg>\` — Chat with AI\n- \`/ping\` — Test if bot is alive\n- \`/new\` — Clear chat\n- \`/model\` — Show model\n- \`/image <desc>\` — Make image\n- \`/help\` — This help\n\nModel: ${DEFAULT_MODEL}`,
-          },
-        });
+        return res.json({ type: 4, data: { content: '**Commands:**\n- `/ask <msg>` — Chat with AI\n- `/help` — Show this' } });
       }
 
-      if (cmd === 'image') {
-        const prompt = opt('prompt');
-        if (!prompt) return res.status(200).json({ type: 4, data: { content: 'Usage: `/image <description>`' } });
-        const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=1024&height=1024&nologo=true`;
-        return res.status(200).json({ type: 4, data: { content: `![${prompt}](${url})` } });
-      }
-
-      return res.status(200).json({ type: 4, data: { content: 'Unknown command.' } });
+      return res.json({ type: 4, data: { content: `Unknown: ${cmd}` } });
     }
 
-    return res.status(400).send('Unhandled');
-  } catch (error) {
-    return res.status(500).send('Internal error');
+    return res.status(400).send('Nope');
+  } catch (e) {
+    console.log(`CRASH: ${e.message}`);
+    return res.status(500).send('Error');
   }
 };
