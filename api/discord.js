@@ -43,7 +43,6 @@ module.exports = async (req, res) => {
   if (req.method !== 'POST') return res.status(405).send('Method Not Allowed');
 
   let logId = Math.random().toString(36).slice(2, 8);
-  console.log(`[${logId}] === NEW REQUEST ===`);
 
   try {
     const rawBody = await getRawBody(req);
@@ -51,17 +50,14 @@ module.exports = async (req, res) => {
     const timestamp = req.headers['x-signature-timestamp'];
 
     if (!signature || !timestamp || !verifyKey(rawBody, signature, timestamp, PUBLIC_KEY)) {
-      console.log(`[${logId}] BAD SIGNATURE`);
       return res.status(401).send('Invalid signature');
     }
 
     const interaction = JSON.parse(rawBody);
     const cmd = interaction.data?.name || 'N/A';
-    console.log(`[${logId}] type=${interaction.type} cmd=${cmd}`);
 
     // PING
     if (interaction.type === 1) {
-      console.log(`[${logId}] PONG`);
       return res.status(200).json({ type: 1 });
     }
 
@@ -81,23 +77,18 @@ module.exports = async (req, res) => {
       // ========== /ask ==========
       if (cmd === 'ask') {
         const userMsg = opt('message');
-        console.log(`[${logId}] /ask message="${userMsg ? userMsg.slice(0, 50) : 'EMPTY'}"`);
 
         if (!userMsg) {
           return res.status(200).json({ type: 4, data: { content: 'Usage: `/ask <your message>`' } });
         }
 
         if (!OPENROUTER_API_KEY) {
-          console.log(`[${logId}] NO API KEY`);
           return res.status(200).json({ type: 4, data: { content: 'Error: API key not configured.' } });
         }
 
         try {
           const hist = getMemory(memKey);
           hist.push({ role: 'user', content: userMsg });
-
-          console.log(`[${logId}] Calling AI (${DEFAULT_MODEL})...`);
-          const t0 = Date.now();
 
           const aiResp = await fetch(OPENROUTER_URL, {
             method: 'POST',
@@ -115,27 +106,31 @@ module.exports = async (req, res) => {
             }),
           });
 
-          const elapsed = Date.now() - t0;
-          console.log(`[${logId}] AI status=${aiResp.status} time=${elapsed}ms`);
-
           if (!aiResp.ok) {
             const errText = await aiResp.text();
-            console.error(`[${logId}] AI error: ${errText}`);
-            return res.status(200).json({ type: 4, data: { content: `AI error ${aiResp.status}. Check logs.` } });
+            return res.status(200).json({ type: 4, data: { content: `AI error ${aiResp.status}: ${errText.slice(0, 200)}` } });
           }
 
           const aiData = await aiResp.json();
           const reply = aiData.choices?.[0]?.message?.content || 'No response.';
-          console.log(`[${logId}] Reply OK (${reply.length} chars)`);
 
           hist.push({ role: 'assistant', content: reply });
           memory.set(memKey, trimMemory(hist));
 
           return res.status(200).json({ type: 4, data: { content: reply } });
         } catch (err) {
-          console.error(`[${logId}] /ask crashed: ${err.message}`);
           return res.status(200).json({ type: 4, data: { content: `Error: ${err.message}` } });
         }
+      }
+
+      // ========== /ping ==========
+      if (cmd === 'ping') {
+        return res.status(200).json({
+          type: 4,
+          data: {
+            content: `Pong! Bot is live. Model: \`${DEFAULT_MODEL}\`. API key: ${OPENROUTER_API_KEY ? 'OK' : 'MISSING'}. ID: ${logId}`,
+          },
+        });
       }
 
       // ========== Simple commands ==========
@@ -151,7 +146,9 @@ module.exports = async (req, res) => {
       if (cmd === 'help') {
         return res.status(200).json({
           type: 4,
-          data: { content: `**Commands:**\n- \`/ask <msg>\` — Chat with AI\n- \`/new\` — Clear chat\n- \`/model\` — Show model\n- \`/image <desc>\` — Make image\n- \`/help\` — This help\n\nModel: ${DEFAULT_MODEL}` }
+          data: {
+            content: `**Commands:**\n- \`/ask <msg>\` — Chat with AI\n- \`/ping\` — Test if bot is alive\n- \`/new\` — Clear chat\n- \`/model\` — Show model\n- \`/image <desc>\` — Make image\n- \`/help\` — This help\n\nModel: ${DEFAULT_MODEL}`,
+          },
         });
       }
 
@@ -162,13 +159,11 @@ module.exports = async (req, res) => {
         return res.status(200).json({ type: 4, data: { content: `![${prompt}](${url})` } });
       }
 
-      console.log(`[${logId}] Unknown command: ${cmd}`);
       return res.status(200).json({ type: 4, data: { content: 'Unknown command.' } });
     }
 
     return res.status(400).send('Unhandled');
   } catch (error) {
-    console.error(`[${logId}] FATAL: ${error.message}`);
     return res.status(500).send('Internal error');
   }
 };
