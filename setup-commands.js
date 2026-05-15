@@ -54,29 +54,29 @@ const commands = [
 ];
 
 async function registerCommands() {
+  // PUT to /commands with an array registers ALL commands in one request
   const url = `https://discord.com/api/v10/applications/${APPLICATION_ID}/commands`;
 
-  for (const cmd of commands) {
-    try {
-      const resp = await fetch(url, {
-        method: 'PUT',
-        headers: {
-          'Authorization': `Bot ${BOT_TOKEN}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(cmd),
-      });
+  try {
+    const resp = await fetch(url, {
+      method: 'PUT',
+      headers: {
+        'Authorization': `Bot ${BOT_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(commands),
+    });
 
-      if (resp.ok) {
-        const data = await resp.json();
-        console.log(`Registered: /${data.name}`);
-      } else {
-        const err = await resp.text();
-        console.error(`Failed to register /${cmd.name}: ${resp.status} - ${err}`);
-      }
-    } catch (e) {
-      console.error(`Error registering /${cmd.name}: ${e.message}`);
+    if (resp.ok) {
+      const data = await resp.json();
+      console.log(`Registered ${data.length} commands:`);
+      data.forEach(c => console.log(`  /${c.name} - ${c.description}`));
+    } else {
+      const err = await resp.text();
+      console.error(`Failed: ${resp.status} - ${err}`);
     }
+  } catch (e) {
+    console.error(`Error: ${e.message}`);
   }
 
   console.log('\nDone! Slash commands are now available in your server.');
