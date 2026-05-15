@@ -1,0 +1,13 @@
+{
+  "name": "vercel-hermes",
+  "version": "1.0.0",
+  "description": "Discord bot powered by OpenRouter AI - runs on Vercel",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "setup-commands": "node setup-commands.js"
+  },
+  "dependencies": {
+    "discord-interactions": "^3.4.0"
+  }
+}
