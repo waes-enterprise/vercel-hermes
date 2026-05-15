@@ -30,9 +30,10 @@ function getRawBody(req) {
 
 async function callAI(messages) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 8000);
+  const timeout = setTimeout(() => controller.abort(), 25000);
 
   try {
+    console.log(`[AI] Calling model: ${DEFAULT_MODEL}`);
     const resp = await fetch(OPENROUTER_URL, {
       method: 'POST',
       headers: {
@@ -51,17 +52,22 @@ async function callAI(messages) {
     });
 
     clearTimeout(timeout);
+    console.log(`[AI] Response status: ${resp.status}`);
 
     if (!resp.ok) {
-      const err = await resp.text();
-      throw new Error(`AI error ${resp.status}`);
+      const errText = await resp.text();
+      console.error(`[AI] Error response: ${resp.status} - ${errText}`);
+      throw new Error(`AI returned status ${resp.status}`);
     }
 
     const data = await resp.json();
-    return data.choices?.[0]?.message?.content || 'No response.';
+    const content = data.choices?.[0]?.message?.content || 'No response generated.';
+    console.log(`[AI] Success, response length: ${content.length}`);
+    return content;
   } catch (e) {
     clearTimeout(timeout);
-    if (e.name === 'AbortError') throw new Error('AI took too long to respond');
+    console.error(`[AI] Call failed: ${e.name}: ${e.message}`);
+    if (e.name === 'AbortError') throw new Error('AI took too long to respond. Try again.');
     throw e;
   }
 }
@@ -86,19 +92,25 @@ module.exports = async (req, res) => {
     const timestamp = req.headers['x-signature-timestamp'];
 
     if (!signature || !timestamp || !verifyKey(rawBody, signature, timestamp, PUBLIC_KEY)) {
+      console.error('[Auth] Invalid signature');
       return res.status(401).send('Invalid signature');
     }
 
     const interaction = JSON.parse(rawBody);
+    console.log(`[Discord] Interaction type=${interaction.type} cmd=${interaction.data?.name || 'N/A'}`);
 
+    // PING
     if (interaction.type === 1) {
       return res.status(200).json({ type: 1 });
     }
 
+    // SLASH COMMAND
     if (interaction.type === 2) {
       const userId = interaction.member?.user?.id || interaction.user?.id;
       const channelId = interaction.channel_id;
       const memKey = `${userId}_${channelId}`;
+      const interactionToken = interaction.token;
+      const appId = interaction.application_id;
 
       if (ALLOWED_USERS.length > 0 && !ALLOWED_USERS.includes(userId)) {
         return res.status(200).json({ type: 4, data: { content: 'Not authorized.', flags: 64 } });
@@ -108,24 +120,56 @@ module.exports = async (req, res) => {
       const opts = interaction.data.options || [];
       const opt = (name) => opts.find(o => o.name === name)?.value || '';
 
+      // === /ask — needs deferred response since AI can take >3s ===
       if (cmd === 'ask') {
         const userMsg = opt('message');
         if (!userMsg) {
           return res.status(200).json({ type: 4, data: { content: 'Usage: `/ask <your message>`' } });
         }
 
+        // Step 1: Acknowledge immediately (defer) — shows "thinking..." to user
+        res.status(200).json({ type: 5, data: { content: '' } });
+
+        // Step 2: Call AI in background
         try {
           const hist = getMemory(memKey);
           hist.push({ role: 'user', content: userMsg });
           const reply = await callAI(trimMemory(hist));
           hist.push({ role: 'assistant', content: reply });
           memory.set(memKey, trimMemory(hist));
-          return res.status(200).json({ type: 4, data: { content: reply } });
+
+          // Step 3: Send followup via webhook
+          const followup = await fetch(
+            `https://discord.com/api/v10/webhooks/${appId}/${interactionToken}`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ content: reply }),
+            }
+          );
+
+          if (!followup.ok) {
+            const errText = await followup.text();
+            console.error(`[Discord] Followup failed: ${followup.status} - ${errText}`);
+          } else {
+            console.log(`[Discord] Followup sent successfully`);
+          }
         } catch (err) {
-          console.error('AI Error:', err.message);
-          return res.status(200).json({ type: 4, data: { content: `Error: ${err.message}` } });
+          console.error(`[Ask] Error: ${err.message}`);
+          // Send error as followup
+          await fetch(
+            `https://discord.com/api/v10/webhooks/${appId}/${interactionToken}`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ content: `Error: ${err.message}` }),
+            }
+          );
         }
+        return;
       }
+
+      // === Simple commands (respond instantly) ===
 
       if (cmd === 'new') {
         memory.delete(memKey);
@@ -155,7 +199,7 @@ module.exports = async (req, res) => {
 
     return res.status(400).send('Unhandled');
   } catch (error) {
-    console.error('Error:', error.message);
+    console.error(`[Error] ${error.message}`);
     return res.status(500).json({ type: 4, data: { content: `Error: ${error.message}` } });
   }
 };
