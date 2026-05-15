@@ -8,6 +8,7 @@
     "setup-commands": "node setup-commands.js"
   },
   "dependencies": {
+    "@vercel/functions": "^1.0.0",
     "discord-interactions": "^3.4.0"
   }
 }

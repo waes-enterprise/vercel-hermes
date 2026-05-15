@@ -30,11 +30,11 @@ function getRawBody(req) {
 
 async function callAI(messages) {
   if (!OPENROUTER_API_KEY) {
-    throw new Error('OpenRouter API key is not configured on Vercel. Check environment variables.');
+    throw new Error('OpenRouter API key not set on Vercel.');
   }
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 25000);
+  const timeout = setTimeout(() => controller.abort(), 55000);
 
   try {
     console.log(`[AI] Calling ${DEFAULT_MODEL}...`);
@@ -49,7 +49,7 @@ async function callAI(messages) {
       body: JSON.stringify({
         model: DEFAULT_MODEL,
         messages,
-        max_tokens: 800,
+        max_tokens: 1024,
         temperature: 0.7,
       }),
       signal: controller.signal,
@@ -61,17 +61,17 @@ async function callAI(messages) {
     if (!resp.ok) {
       const errText = await resp.text();
       console.error(`[AI] Error: ${resp.status} - ${errText}`);
-      throw new Error(`AI error ${resp.status}: ${errText.slice(0, 200)}`);
+      throw new Error(`AI error ${resp.status}`);
     }
 
     const data = await resp.json();
-    const content = data.choices?.[0]?.message?.content || 'No response generated.';
+    const content = data.choices?.[0]?.message?.content || 'No response.';
     console.log(`[AI] OK, ${content.length} chars`);
     return content;
   } catch (e) {
     clearTimeout(timeout);
     console.error(`[AI] Failed: ${e.name}: ${e.message}`);
-    if (e.name === 'AbortError') throw new Error('AI timed out. Try again.');
+    if (e.name === 'AbortError') throw new Error('AI timed out.');
     throw e;
   }
 }
@@ -84,21 +84,6 @@ function getMemory(key) {
 function trimMemory(arr) {
   if (arr.length <= MAX_MSGS + 1) return arr;
   return [arr[0], ...arr.slice(-MAX_MSGS)];
-}
-
-async function editMessage(appId, token, content) {
-  const url = `https://discord.com/api/v10/webhooks/${appId}/${token}/messages/@original`;
-  const resp = await fetch(url, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content }),
-  });
-  if (!resp.ok) {
-    const err = await resp.text();
-    console.error(`[Discord] Edit failed: ${resp.status} - ${err}`);
-  } else {
-    console.log(`[Discord] Message edited OK`);
-  }
 }
 
 module.exports = async (req, res) => {
@@ -138,41 +123,89 @@ module.exports = async (req, res) => {
       const opts = interaction.data.options || [];
       const opt = (name) => opts.find(o => o.name === name)?.value || '';
 
-      // === /ask ===
+      // === /ask — deferred response with waitUntil ===
       if (cmd === 'ask') {
         const userMsg = opt('message');
         if (!userMsg) {
           return res.status(200).json({ type: 4, data: { content: 'Usage: `/ask <your message>`' } });
         }
 
-        // Check API key exists
         if (!OPENROUTER_API_KEY) {
           return res.status(200).json({
             type: 4,
-            data: { content: 'Bot not configured. OpenRouter API key missing on Vercel.' },
+            data: { content: 'Bot not configured. API key missing on Vercel.' },
           });
         }
 
+        // Step 1: Send deferred ACK immediately (type 5 = "thinking...")
+        res.status(200).json({ type: 5, data: { content: '' } });
+
+        // Step 2: Use waitUntil to keep the function alive for AI + followup
         try {
-          const hist = getMemory(memKey);
-          hist.push({ role: 'user', content: userMsg });
+          const { waitUntil } = require('@vercel/functions');
 
-          // Call AI first, then respond
-          const reply = await callAI(trimMemory(hist));
-          hist.push({ role: 'assistant', content: reply });
-          memory.set(memKey, trimMemory(hist));
+          waitUntil((async () => {
+            try {
+              const hist = getMemory(memKey);
+              hist.push({ role: 'user', content: userMsg });
+              const reply = await callAI(trimMemory(hist));
+              hist.push({ role: 'assistant', content: reply });
+              memory.set(memKey, trimMemory(hist));
 
-          return res.status(200).json({ type: 4, data: { content: reply } });
-        } catch (err) {
-          console.error(`[Ask] Error: ${err.message}`);
-          return res.status(200).json({
-            type: 4,
-            data: { content: `Error: ${err.message}` },
-          });
+              await fetch(
+                `https://discord.com/api/v10/webhooks/${appId}/${token}`,
+                {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ content: reply }),
+                }
+              );
+              console.log('[Discord] Followup sent OK');
+            } catch (err) {
+              console.error(`[Ask] ${err.message}`);
+              await fetch(
+                `https://discord.com/api/v10/webhooks/${appId}/${token}`,
+                {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ content: `Error: ${err.message}` }),
+                }
+              );
+            }
+          })());
+        } catch (e) {
+          // waitUntil not available, fall back to direct await
+          console.log('[Discord] waitUntil unavailable, using direct await');
+          try {
+            const hist = getMemory(memKey);
+            hist.push({ role: 'user', content: userMsg });
+            const reply = await callAI(trimMemory(hist));
+            hist.push({ role: 'assistant', content: reply });
+            memory.set(memKey, trimMemory(hist));
+
+            await fetch(
+              `https://discord.com/api/v10/webhooks/${appId}/${token}`,
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ content: reply }),
+              }
+            );
+          } catch (err) {
+            await fetch(
+              `https://discord.com/api/v10/webhooks/${appId}/${token}`,
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ content: `Error: ${err.message}` }),
+              }
+            );
+          }
         }
+        return;
       }
 
-      // === Simple commands ===
+      // === Simple commands (instant) ===
       if (cmd === 'new') {
         memory.delete(memKey);
         return res.status(200).json({ type: 4, data: { content: 'Conversation cleared!' } });
